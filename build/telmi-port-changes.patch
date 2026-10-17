@@ -1,0 +1,1892 @@
+diff --git a/Dockerfile.portmaster b/Dockerfile.portmaster
+new file mode 100644
+index 00000000..17f120a1
+--- /dev/null
++++ b/Dockerfile.portmaster
+@@ -0,0 +1,33 @@
++FROM debian:buster
++
++# Buster keeps the build userspace below ArkOS's Ubuntu 19.10 / glibc 2.30
++# baseline while still providing SDL2_mixer 2.0.4, which is enough now that the
++# PortMaster build no longer hard-requires the 2.6.x-only music position APIs.
++
++RUN sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list && \
++    sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list && \
++    sed -i '/buster-updates/d' /etc/apt/sources.list && \
++    printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99buster-archive && \
++    dpkg --add-architecture arm64 && \
++    apt-get update && \
++    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
++      build-essential \
++      cmake \
++      make \
++      pkg-config \
++      git \
++      ca-certificates \
++      gcc-aarch64-linux-gnu \
++      g++-aarch64-linux-gnu \
++      libc6-dev-arm64-cross \
++      libsdl2-dev:arm64 \
++      libsdl2-image-dev:arm64 \
++      libsdl2-mixer-dev:arm64 \
++      libsdl2-ttf-dev:arm64 \
++      libsdl2-gfx-dev:arm64 \
++      libmpg123-dev:arm64 && \
++    rm -rf /var/lib/apt/lists/*
++
++WORKDIR /workspace
++ENV CC=aarch64-linux-gnu-gcc
++ENV CXX=aarch64-linux-gnu-g++
+diff --git a/Makefile b/Makefile
+index f6c603aa..3f67475a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -141,6 +141,9 @@ test:
+ 	@cp -R $(TEST_SRC_DIR)/infoPanel_test_data $(BUILD_TEST_DIR)/
+ 	cd $(BUILD_TEST_DIR) && ./test
+ 
++portmaster:
++	PLATFORM=portmaster CROSS_COMPILE=aarch64-linux-gnu- $(MAKE) -C src/storyTeller
++
+ static-analysis:
+ 	@cd $(ROOT_DIR) && cppcheck -I $(INCLUDE_DIR) --enable=all $(SRC_DIR)
+ 
+diff --git a/portmaster/README.md b/portmaster/README.md
+new file mode 100644
+index 00000000..1d816221
+--- /dev/null
++++ b/portmaster/README.md
+@@ -0,0 +1,66 @@
++# Building for PortMaster (R36S / ArkOS / DarkOS)
++
++Targets ARM64 devices running ArkOS, DarkOS, and similar RK3326 boards. The build
++is intentionally pinned to a Buster userspace so the resulting binary stays at a
++glibc level that remains compatible with the older ArkOS Ubuntu 19.10 base.
++Bookworm ships a newer SDL2_mixer development package, but it also raises the
++glibc baseline beyond what older ArkOS images can load.
++
++## Prerequisites
++
++- [Docker](https://docs.docker.com/get-docker/) installed and running
++
++## Build
++
++### Quick Build (All-in-One)
++
++Run all steps at once from the project root:
++
++```bash
++docker build -t telmi-builder-portmaster -f Dockerfile.portmaster . && docker run --rm -v "$(pwd)":/workspace telmi-builder-portmaster bash portmaster/scripts/build_portmaster.sh && bash portmaster/scripts/package_portmaster.sh
++```
++
++### Step-by-Step Build
++
++**1. Build the Docker image** (once, from the project root):
++
++```bash
++docker build -f Dockerfile.portmaster -t telmi-builder-portmaster .
++```
++
++**2. Compile the binary:**
++
++```bash
++docker run --rm -v "$(pwd)":/workspace telmi-builder-portmaster \
++    bash portmaster/scripts/build_portmaster.sh
++```
++
++**3. Assemble the PortMaster package:**
++
++```bash
++bash portmaster/scripts/package_portmaster.sh
++```
++
++The ready-to-deploy package is output to `dist/portmaster/`.
++
++## Deploy
++
++Copy the contents of `dist/portmaster/` to `/roms/ports/` on your device SD card:
++
++```
++/roms/ports/
++├── Telmi.sh               # PortMaster launcher entry point
++└── telmi/
++    ├── telmi_rk3326.aarch64
++    ├── telmi.gptk
++    ├── libs.aarch64/
++    └── data/
++        ├── res/           # fonts and UI assets
++        ├── Music/         # music library
++        ├── Stories/       # story content
++        └── Saves/         # save states (written at runtime)
++```
++
++The launcher expects PortMaster's `DEVICE_ARCH`-specific library folder
++convention (`libs.aarch64/`) so any bundled shared libraries stay isolated to
++this port and do not affect the rest of the system.
+diff --git a/portmaster/scripts/build_portmaster.sh b/portmaster/scripts/build_portmaster.sh
+new file mode 100755
+index 00000000..6cdeedce
+--- /dev/null
++++ b/portmaster/scripts/build_portmaster.sh
+@@ -0,0 +1,23 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
++OUT_DIR="$ROOT_DIR/dist/portmaster-build"
++PORTMASTER_BINARY="telmi_rk3326.aarch64"
++DEVICE_ARCH="${DEVICE_ARCH:-aarch64}"
++
++mkdir -p "$OUT_DIR"
++
++make -C "$ROOT_DIR/src/storyTeller" clean
++make -C "$ROOT_DIR/src/storyTeller" \
++  BUILD_DIR="$OUT_DIR" \
++  PLATFORM=portmaster \
++  CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-gnu-}
++
++mv -f "$OUT_DIR/storyTeller" "$OUT_DIR/$PORTMASTER_BINARY"
++chmod +x "$OUT_DIR/$PORTMASTER_BINARY"
++
++mkdir -p "$OUT_DIR/data"
++mkdir -p "$OUT_DIR/libs.${DEVICE_ARCH}"
++
++echo "Built: $OUT_DIR/$PORTMASTER_BINARY"
+diff --git a/portmaster/scripts/package_portmaster.sh b/portmaster/scripts/package_portmaster.sh
+new file mode 100755
+index 00000000..005ffb3a
+--- /dev/null
++++ b/portmaster/scripts/package_portmaster.sh
+@@ -0,0 +1,53 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
++BUILD_DIR="$ROOT_DIR/dist/portmaster-build"
++PORTS_DIR="$ROOT_DIR/dist/portmaster"
++APP_DIR="$PORTS_DIR/telmi"
++PORTMASTER_BINARY="telmi_rk3326.aarch64"
++DEVICE_ARCH="${DEVICE_ARCH:-aarch64}"
++PORT_SCRIPT_NAME="Telmi.sh"
++
++if [[ ! -f "$BUILD_DIR/$PORTMASTER_BINARY" ]]; then
++  echo "Missing binary: $BUILD_DIR/$PORTMASTER_BINARY"
++  echo "Run ./portmaster/scripts/build_portmaster.sh first."
++  exit 1
++fi
++
++rm -rf "$PORTS_DIR"
++mkdir -p "$APP_DIR"
++
++cp "$ROOT_DIR/portmaster/telmi.sh" "$PORTS_DIR/$PORT_SCRIPT_NAME"
++chmod +x "$PORTS_DIR/$PORT_SCRIPT_NAME"
++
++cp "$ROOT_DIR/portmaster/telmi.gptk" "$APP_DIR/telmi.gptk"
++# Controller mapping used by the standalone launcher (copy of the dArkOS one, includes the R36S gamepad)
++if [[ -f "$ROOT_DIR/portmaster/gamecontrollerdb.txt" ]]; then
++  cp "$ROOT_DIR/portmaster/gamecontrollerdb.txt" "$APP_DIR/gamecontrollerdb.txt"
++fi
++cp "$BUILD_DIR/$PORTMASTER_BINARY" "$APP_DIR/$PORTMASTER_BINARY"
++chmod +x "$APP_DIR/$PORTMASTER_BINARY"
++
++mkdir -p "$APP_DIR/data/res" "$APP_DIR/data/Music" "$APP_DIR/data/Stories" "$APP_DIR/data/Saves/Stories" "$APP_DIR/libs.${DEVICE_ARCH}"
++
++if [[ -d "$ROOT_DIR/src/storyTeller/res" ]]; then
++  cp -R "$ROOT_DIR"/src/storyTeller/res/. "$APP_DIR/data/res/"
++fi
++
++if [[ -d "$ROOT_DIR/static/build/.tmp_update/res" ]]; then
++  cp -R "$ROOT_DIR"/static/build/.tmp_update/res/. "$APP_DIR/data/res/"
++fi
++
++if [[ ! -f "$APP_DIR/data/res/Exo2-Regular.ttf" || ! -f "$APP_DIR/data/res/Exo2-Bold.ttf" ]]; then
++  echo "Missing required fonts in package: Exo2-Regular.ttf / Exo2-Bold.ttf"
++  exit 1
++fi
++
++if [[ ! -f "$APP_DIR/data/res/selectStories.png" ]]; then
++  echo "Missing required UI resources in package (expected selectStories.png)"
++  exit 1
++fi
++
++echo "PortMaster package ready: $PORTS_DIR"
++echo "Copy contents of dist/portmaster/ to /roms/ports/ on your SD card"
+diff --git a/portmaster/telmi.sh b/portmaster/telmi.sh
+new file mode 100755
+index 00000000..515a13a3
+--- /dev/null
++++ b/portmaster/telmi.sh
+@@ -0,0 +1,107 @@
++#!/bin/bash
++# Telmi launcher for ArkOS / dArkOS (RK3326 handhelds such as the R36S).
++# Standalone: it does NOT need PortMaster. Layout expected on the roms card:
++#   ports/Telmi.sh            <- this script
++#   ports/telmi/              <- binary and data/res (images, fonts)
++#   Stories/ Music/ Saves/    <- at the root of the card (same layout as a Telmi OS card, for Telmi Sync)
++
++PORTSDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
++GAMEDIR="$PORTSDIR/telmi"
++DEVICE_ARCH="${DEVICE_ARCH:-aarch64}"
++BIN="$GAMEDIR/telmi_rk3326.aarch64"
++LOG="$GAMEDIR/log.txt"
++
++ESUDO=""
++[ "$(id -u)" != "0" ] && ESUDO="sudo"
++
++cd "$GAMEDIR" || exit 1
++
++# Keep the log small (the card is slow and fragile)
++[ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 100000 ] && : > "$LOG"
++echo "[telmi] launcher invoked $(date)" >> "$LOG" 2>/dev/null
++exec > >(tee -a "$LOG") 2>&1
++
++export GAMEDIR
++# Stories/, Music/ and Saves/ at the root of the roms card (= a Telmi OS card layout, managed by Telmi Sync).
++# Falls back to GAMEDIR/data when the card root does not hold a Stories folder yet.
++CARDROOT="$(dirname "$PORTSDIR")"
++if [ -d "$CARDROOT/Stories" ] || [ -f "$CARDROOT/autorun.inf" ]; then
++  export TELMI_DATA_DIR="$CARDROOT"
++fi
++export LD_LIBRARY_PATH="$GAMEDIR/libs.${DEVICE_ARCH}:$LD_LIBRARY_PATH"
++export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
++[ -d "$XDG_RUNTIME_DIR" ] || { XDG_RUNTIME_DIR=/tmp/runtime-$(id -un); mkdir -p "$XDG_RUNTIME_DIR"; }
++
++export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-alsa}"
++export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
++export SDL_VIDEO_EGL_DRIVER="${SDL_VIDEO_EGL_DRIVER:-libEGL.so}"
++
++# Controller mapping: the one shipped with the port, else the one of dArkOS
++if [ -z "$SDL_GAMECONTROLLERCONFIG_FILE" ]; then
++  for db in "$GAMEDIR/gamecontrollerdb.txt" /opt/inttools/gamecontrollerdb.txt; do
++    [ -f "$db" ] && { export SDL_GAMECONTROLLERCONFIG_FILE="$db"; break; }
++  done
++fi
++
++echo "[telmi] GAMEDIR=$GAMEDIR TELMI_DATA_DIR=${TELMI_DATA_DIR:-$GAMEDIR/data}"
++echo "[telmi] Launching at $(date)"
++echo "[telmi] SDL_VIDEODRIVER=$SDL_VIDEODRIVER SDL_VIDEO_EGL_DRIVER=$SDL_VIDEO_EGL_DRIVER controllers=${SDL_GAMECONTROLLERCONFIG_FILE:-none}"
++
++BACKLIGHT_DIR="/sys/class/backlight/backlight"
++if [ -r "$BACKLIGHT_DIR/max_brightness" ] && [ -r "$BACKLIGHT_DIR/brightness" ]; then
++  MAX_BRIGHTNESS=$(cat "$BACKLIGHT_DIR/max_brightness" 2>/dev/null)
++  CUR_BRIGHTNESS=$(cat "$BACKLIGHT_DIR/brightness" 2>/dev/null)
++  if [ -n "$MAX_BRIGHTNESS" ] && [ "$MAX_BRIGHTNESS" -gt 0 ] && [ "$CUR_BRIGHTNESS" = "0" ]; then
++    echo "[telmi] backlight was 0, restoring to max"
++    if [ -w "$BACKLIGHT_DIR/brightness" ]; then
++      echo "$MAX_BRIGHTNESS" > "$BACKLIGHT_DIR/brightness" 2>/dev/null || true
++    else
++      $ESUDO sh -c "echo $MAX_BRIGHTNESS > $BACKLIGHT_DIR/brightness" 2>/dev/null || true
++    fi
++    sleep 0.1
++  fi
++fi
++
++if [ ! -x "$BIN" ]; then
++  echo "[telmi] ERROR: binary missing or not executable: $BIN"
++  exit 1
++fi
++
++if [ ! -f "$GAMEDIR/data/res/Exo2-Regular.ttf" ] || [ ! -f "$GAMEDIR/data/res/Exo2-Bold.ttf" ]; then
++  echo "[telmi] ERROR: required fonts missing in $GAMEDIR/data/res"
++  exit 1
++fi
++
++if [ ! -f "$GAMEDIR/data/res/selectStories.png" ]; then
++  echo "[telmi] ERROR: required UI assets missing in $GAMEDIR/data/res"
++  exit 1
++fi
++
++echo "[telmi] Note: Use double-tap SELECT+START to quit"
++
++"$BIN"
++APP_EXIT_CODE=$?
++echo "[telmi] App exit code: $APP_EXIT_CODE"
++
++if [ "$APP_EXIT_CODE" = "194" ] || [ -f "/tmp/telmi_poweroff.flag" ]; then
++  echo "[telmi] Poweroff requested by app"
++  rm -f /tmp/telmi_poweroff.flag
++  sync
++  $ESUDO poweroff
++  exit 0
++fi
++
++# In Telmi mode (started by telmi_kiosk.sh) a normal quit, i.e. double-tap SELECT+START, switches the console off.
++if [ "$APP_EXIT_CODE" = "0" ] && [ -n "$TELMI_KIOSK" ]; then
++  echo "[telmi] Quit in Telmi mode: powering off"
++  sync
++  $ESUDO poweroff
++  exit 0
++fi
++
++# Only CFWs that have a "ui" service need it restarted (ArkOS/dArkOS return to EmulationStation by themselves)
++if systemctl list-unit-files ui.service 2>/dev/null | grep -q '^ui.service'; then
++  $ESUDO systemctl restart ui
++fi
++
++exit $APP_EXIT_CODE
+diff --git a/src/common/config.mk b/src/common/config.mk
+index 1dec90fb..11ad514a 100644
+--- a/src/common/config.mk
++++ b/src/common/config.mk
+@@ -31,7 +31,7 @@ CFILES := $(CFILES) $(foreach dir, $(SOURCES), $(wildcard $(dir)/*.c))
+ CPPFILES := $(CPPFILES) $(foreach dir, $(SOURCES), $(wildcard $(dir)/*.cpp))
+ OFILES = $(CFILES:.c=.o) $(CPPFILES:.cpp=.o)
+ 
+-CFLAGS := -I../../include -I../common -DPLATFORM_$(shell echo $(PLATFORM) | tr a-z A-Z) -DONION_VERSION="\"$(VERSION)\"" -Wall
++CFLAGS := -I../../include -I../common -I../../src/platform/$(PLATFORM) -DPLATFORM_$(shell echo $(PLATFORM) | tr a-z A-Z) -DONION_VERSION="\"$(VERSION)\"" -Wall
+ 
+ ifeq ($(DEBUG),1)
+ CFLAGS := $(CFLAGS) -DLOG_DEBUG -g3
+@@ -52,3 +52,8 @@ LDFLAGS := $(LDFLAGS) -lshmvar
+ endif
+ 
+ endif
++
++ifeq ($(PLATFORM),portmaster)
++# Static linking to avoid GLIBC version issues across different systems (ArkOS, pan4elec, etc)
++LDFLAGS := $(LDFLAGS) -static-libgcc -static-libstdc++
++endif
+diff --git a/src/common/system/battery.h b/src/common/system/battery.h
+index aeccae25..03604568 100644
+--- a/src/common/system/battery.h
++++ b/src/common/system/battery.h
+@@ -8,7 +8,8 @@
+ #include "utils/msleep.h"
+ #include "utils/process.h"
+ 
+-static time_t battery_last_modified = 0;
++#include "platform_battery.h"
++
+ static bool battery_is_charging = false;
+ 
+ /**
+@@ -19,78 +20,12 @@ static bool battery_is_charging = false;
+ 
+ int battery_getPercentage(void)
+ {
+-    FILE *fp;
+-    int percentage = -1;
+-    int retry = 3;
+-
+-    while (percentage == -1 && retry > 0) {
+-        if (exists("/tmp/percBat")) {
+-            file_get(fp, "/tmp/percBat", "%d", &percentage);
+-            break;
+-        }
+-        else {
+-            printf_debug("/tmp/percBat not found (%d)\n", retry);
+-
+-            if (!process_isRunning("batmon")) {
+-                printf_debug("bin/batmon not running (%d)\n", retry);
+-                break;
+-            }
+-        }
+-        retry--;
+-        msleep(100);
+-    }
+-
+-#ifndef PLATFORM_MIYOOMINI
+-#ifdef LOG_DEBUG
+-    return 78;
+-#endif
+-#endif
+-
+-    if (percentage == -1)
+-        percentage = 0; // show zero when percBat not found
+-
+-    return percentage;
++    return PLATFORM_BATTERY_GET_PERCENTAGE();
+ }
+ 
+ bool battery_isCharging(void)
+ {
+-#ifdef PLATFORM_MIYOOMINI
+-    if (DEVICE_ID == MIYOO283) {
+-        char charging = 0;
+-        int fd = open(GPIO_DIR2 "gpio59/value", O_RDONLY);
+-
+-        if (fd < 0) {
+-            // export gpio59, direction: in
+-            file_write(GPIO_DIR1 "export", "59", 2);
+-            file_write(GPIO_DIR2 "gpio59/direction", "in", 2);
+-            fd = open(GPIO_DIR2 "gpio59/value", O_RDONLY);
+-        }
+-
+-        if (fd >= 0) {
+-            read(fd, &charging, 1);
+-            close(fd);
+-        }
+-
+-        return charging == '1';
+-    } else if (HAS_AXP()) {
+-        char *cmd = "cd /customer/app/ ; ./axp_test";
+-        int batJsonSize = 100;
+-        char buf[batJsonSize];
+-        int charge_number;
+-
+-        FILE *fp;
+-        fp = popen(cmd, "r");
+-        if (fgets(buf, batJsonSize, fp) != NULL) {
+-            sscanf(buf, "{\"battery\":%*d, \"voltage\":%*d, \"charging\":%d}",
+-                   &charge_number);
+-        }
+-        pclose(fp);
+-        return charge_number == 3;
+-    }
+-    return false;
+-#else
+-    return false;
+-#endif
++    return PLATFORM_BATTERY_IS_CHARGING();
+ }
+ 
+ bool battery_hasChanged(int ticks, int *out_percentage)
+@@ -109,13 +44,12 @@ bool battery_hasChanged(int ticks, int *out_percentage)
+         battery_is_charging = false;
+     }
+ 
+-    if (file_isModified("/tmp/percBat", &battery_last_modified)) {
+-        int current_percentage = battery_getPercentage();
++    // Platform-agnostic: just poll the battery percentage
++    int current_percentage = battery_getPercentage();
+ 
+-        if (current_percentage != *out_percentage) {
+-            *out_percentage = current_percentage;
+-            changed = true;
+-        }
++    if (current_percentage != *out_percentage) {
++        *out_percentage = current_percentage;
++        changed = true;
+     }
+ 
+     return changed;
+diff --git a/src/common/system/display.h b/src/common/system/display.h
+index b2c088b4..db409f7b 100644
+--- a/src/common/system/display.h
++++ b/src/common/system/display.h
+@@ -26,30 +26,6 @@ static uint32_t stride, bpp;
+ static uint8_t *savebuf;
+ static bool display_enabled = true;
+ 
+-void display_init(void) {
+-    // Open and mmap FB
+-    fb_fd = open("/dev/fb0", O_RDWR);
+-
+-    ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo);
+-    fb_addr = (uint32_t *) mmap(0, finfo.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
+-
+-    ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo);
+-    DISPLAY_WIDTH = vinfo.xres;
+-    DISPLAY_HEIGHT = vinfo.yres;
+-}
+-
+-//
+-//    Get physical screen resolution
+-//
+-void display_getResolution(void) {
+-    FILE *file = fopen("/tmp/screen_resolution", "r");
+-    if (file == NULL) {
+-        return;
+-    }
+-    fscanf(file, "%dx%d", &DISPLAY_WIDTH, &DISPLAY_HEIGHT);
+-    fclose(file);
+-}
+-
+ //
+ //    Save/Clear Display area
+ //
+@@ -99,58 +75,32 @@ void display_reset(void) {
+     ioctl(fb_fd, FBIOPUT_VSCREENINFO, &vinfo);
+ }
+ 
++#include "platform_brightness.h"
++
+ //
+-//    Screen On/Off
++//    Get physical screen resolution (written by the Miyoo Mini system into /tmp/screen_resolution; unused elsewhere)
+ //
+-void display_setScreen(bool enabled) {
+-    if (display_enabled == enabled) {
++void display_getResolution(void)
++{
++    FILE *file = fopen("/tmp/screen_resolution", "r");
++    if (file == NULL) {
+         return;
+     }
+-
+-    // export gpio4, direction: out
+-    file_write(GPIO_DIR1 "export", "4", 1);
+-    file_write(GPIO_DIR2 "gpio4/direction", "out", 3);
+-
+-    // screen on/off
+-    file_write(GPIO_DIR2 "gpio4/value", enabled ? "1" : "0", 1);
+-
+-    // unexport gpio4
+-    file_write(GPIO_DIR1 "unexport", "4", 1);
+-
+-    if (enabled) {
+-        // re-enable brightness control
+-        file_write(PWM_DIR "export", "0", 1);
+-        file_write(PWM_DIR "pwm0/enable", "0", 1);
+-        file_write(PWM_DIR "pwm0/enable", "1", 1);
+-        display_restore();
+-    } else {
+-        display_save();
+-    }
+-
+-    display_enabled = enabled;
++    fscanf(file, "%dx%d", &DISPLAY_WIDTH, &DISPLAY_HEIGHT);
++    fclose(file);
+ }
+ 
+-void display_toggle(void) { display_setScreen(!display_enabled); }
+-
+-//
+-//    Set Brightness (Raw)
+-//
+-void display_setBrightnessRaw(uint32_t value) {
+-    FILE *fp;
+-    file_put_sync(fp, PWM_DIR "pwm0/duty_cycle", "%u", value);
+-    printf_debug("Raw brightness: %d\n", value);
++void display_init(void)
++{
++    // Open and mmap FB
++    fb_fd = open("/dev/fb0", O_RDWR);
++    ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo);
++    fb_addr = (uint32_t *)mmap(0, finfo.smem_len, PROT_READ | PROT_WRITE,
++                               MAP_SHARED, fb_fd, 0);
++    platform_brightness_init();
+ }
+ 
+-// Set display brightness (0 - 10)
+-void display_setBrightness(uint32_t value) {
+-    // Linear curve
+-    // int value_raw = (value == 0) ? 3 : (value * 10);
+-
+-    // Exponential curve
+-    int value_raw = round(3.0 * exp(0.350656 * value));
+-
+-    display_setBrightnessRaw(value_raw);
+-}
++void display_toggle(void) { display_setScreen(!display_enabled); }
+ 
+ //
+ //    Draw frame, fixed 640x480x32bpp for now
+diff --git a/src/common/system/system.h b/src/common/system/system.h
+index 20930bf5..114884a5 100644
+--- a/src/common/system/system.h
++++ b/src/common/system/system.h
+@@ -6,6 +6,7 @@
+ 
+ #include "clock.h"
+ #include "utils/flags.h"
++#include "platform_system.h"
+ 
+ // system directories
+ #define GPIO_DIR1 "/sys/class/gpio/"
+@@ -20,13 +21,13 @@
+ #define system_powersave_off() system_powersave(false)
+ 
+ /**
+- * @brief Creates the file `/tmp/.offOrder`,
+- * which is used by `runtime.sh` for knowing when to show shutdown screen.
+- *
++ * @brief Platform-specific shutdown
++ * - Miyoo Mini: Creates `/tmp/.offOrder` for runtime.sh
++ * - PortMaster: Creates `/tmp/telmi_poweroff.flag` for launcher script
+  */
+ void system_shutdown(void)
+ {
+-    temp_flag_set(".offOrder", true);
++    PLATFORM_SYSTEM_SHUTDOWN();
+     system_clock_get();
+     system_clock_save();
+     sync();
+diff --git a/src/platform/miyoomini/platform_battery.h b/src/platform/miyoomini/platform_battery.h
+new file mode 100644
+index 00000000..80e9fb17
+--- /dev/null
++++ b/src/platform/miyoomini/platform_battery.h
+@@ -0,0 +1,88 @@
++#ifndef PLATFORM_BATTERY_H__
++#define PLATFORM_BATTERY_H__
++
++#include <stdbool.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include "utils/file.h"
++#include "utils/log.h"
++#include "utils/msleep.h"
++#include "utils/process.h"
++#include "system/device_model.h"
++
++// Miyoo Mini battery is managed by batmon process writing to /tmp/percBat
++static int _platform_battery_get_percentage(void)
++{
++    FILE *fp;
++    int percentage = -1;
++    int retry = 3;
++
++    while (percentage == -1 && retry > 0) {
++        if (exists("/tmp/percBat")) {
++            file_get(fp, "/tmp/percBat", "%d", &percentage);
++            break;
++        }
++        else {
++            printf_debug("/tmp/percBat not found (%d)\n", retry);
++
++            if (!process_isRunning("batmon")) {
++                printf_debug("bin/batmon not running (%d)\n", retry);
++                break;
++            }
++        }
++        retry--;
++        msleep(100);
++    }
++
++#ifdef LOG_DEBUG
++    return 78;
++#endif
++
++    if (percentage == -1)
++        percentage = 0; // show zero when percBat not found
++
++    return percentage;
++}
++
++static bool _platform_battery_is_charging(void)
++{
++    if (DEVICE_ID == MIYOO283) {
++        char charging = 0;
++        int fd = open(GPIO_DIR2 "gpio59/value", O_RDONLY);
++
++        if (fd < 0) {
++            // export gpio59, direction: in
++            file_write(GPIO_DIR1 "export", "59", 2);
++            file_write(GPIO_DIR2 "gpio59/direction", "in", 2);
++            fd = open(GPIO_DIR2 "gpio59/value", O_RDONLY);
++        }
++
++        if (fd >= 0) {
++            read(fd, &charging, 1);
++            close(fd);
++        }
++
++        return charging == '1';
++    }
++    else if (DEVICE_ID == MIYOO354) {
++        char *cmd = "cd /customer/app/ ; ./axp_test";
++        int batJsonSize = 100;
++        char buf[batJsonSize];
++        int charge_number;
++
++        FILE *fp;
++        fp = popen(cmd, "r");
++        if (fgets(buf, batJsonSize, fp) != NULL) {
++            sscanf(buf, "{\"battery\":%*d, \"voltage\":%*d, \"charging\":%d}",
++                   &charge_number);
++        }
++        pclose(fp);
++        return charge_number == 3;
++    }
++    return false;
++}
++
++#define PLATFORM_BATTERY_GET_PERCENTAGE() _platform_battery_get_percentage()
++#define PLATFORM_BATTERY_IS_CHARGING()    _platform_battery_is_charging()
++
++#endif // PLATFORM_BATTERY_H__
+diff --git a/src/platform/miyoomini/platform_brightness.h b/src/platform/miyoomini/platform_brightness.h
+new file mode 100644
+index 00000000..3f952d87
+--- /dev/null
++++ b/src/platform/miyoomini/platform_brightness.h
+@@ -0,0 +1,70 @@
++#ifndef PLATFORM_BRIGHTNESS_H__
++#define PLATFORM_BRIGHTNESS_H__
++
++// Miyoo Mini hardware paths
++#define GPIO_DIR1 "/sys/class/gpio/"
++#define GPIO_DIR2 "/sys/devices/gpiochip0/gpio/"
++#define PWM_DIR   "/sys/devices/soc0/soc/1f003400.pwm/pwm/pwmchip0/"
++
++// Track the last raw PWM value set so getBrightnessRaw() can return it
++static uint32_t _display_brightness_raw = 50;
++
++void platform_brightness_init(void)
++{
++    // No-op: Miyoo Mini brightness is controlled via PWM at runtime
++}
++
++void display_setBrightnessRaw(uint32_t value)
++{
++    FILE *fp;
++    file_put_sync(fp, PWM_DIR "pwm0/duty_cycle", "%u", value);
++    _display_brightness_raw = value;
++    printf_debug("Raw brightness: %d\n", value);
++}
++
++int display_getBrightnessRaw(void)
++{
++    return (int)_display_brightness_raw;
++}
++
++int display_getBrightnessMax(void)
++{
++    // Approximate maximum raw PWM value for exponential curve at level 10:
++    // round(3.0 * exp(0.350656 * 10)) ≈ 100
++    return 100;
++}
++
++// Set display brightness (0 - 10) using exponential curve
++void display_setBrightness(uint32_t value)
++{
++    int value_raw = (int)round(3.0 * exp(0.350656 * value));
++    display_setBrightnessRaw(value_raw);
++}
++
++void display_setScreen(bool enabled)
++{
++    // export gpio4, direction: out
++    file_write(GPIO_DIR1 "export", "4", 1);
++    file_write(GPIO_DIR2 "gpio4/direction", "out", 3);
++
++    // screen on/off
++    file_write(GPIO_DIR2 "gpio4/value", enabled ? "1" : "0", 1);
++
++    // unexport gpio4
++    file_write(GPIO_DIR1 "unexport", "4", 1);
++
++    if (enabled) {
++        // re-enable brightness control
++        file_write(PWM_DIR "export", "0", 1);
++        file_write(PWM_DIR "pwm0/enable", "0", 1);
++        file_write(PWM_DIR "pwm0/enable", "1", 1);
++        display_restore();
++    }
++    else {
++        display_save();
++    }
++
++    display_enabled = enabled;
++}
++
++#endif // PLATFORM_BRIGHTNESS_H__
+diff --git a/src/platform/miyoomini/platform_display.h b/src/platform/miyoomini/platform_display.h
+new file mode 100644
+index 00000000..79f355f1
+--- /dev/null
++++ b/src/platform/miyoomini/platform_display.h
+@@ -0,0 +1,9 @@
++#ifndef PLATFORM_DISPLAY_H__
++#define PLATFORM_DISPLAY_H__
++
++#include "SDL2/SDL.h"
++
++// Use RGB565 for Miyoo Mini (optimized for this device's display)
++#define PLATFORM_SDL_PIXEL_FORMAT SDL_PIXELFORMAT_RGB565
++
++#endif // PLATFORM_DISPLAY_H__
+diff --git a/src/platform/miyoomini/platform_input.h b/src/platform/miyoomini/platform_input.h
+new file mode 100644
+index 00000000..d4adce5d
+--- /dev/null
++++ b/src/platform/miyoomini/platform_input.h
+@@ -0,0 +1,90 @@
++#ifndef PLATFORM_INPUT_H__
++#define PLATFORM_INPUT_H__
++
++#include <fcntl.h>
++#include <linux/input.h>
++#include <poll.h>
++
++#include "system/keymap_hw.h"
++
++typedef enum InputAction {
++    INPUT_ACTION_NONE = 0,
++    INPUT_ACTION_QUIT,
++    INPUT_ACTION_MENU,
++    INPUT_ACTION_POWER,
++    INPUT_ACTION_LEFT,
++    INPUT_ACTION_RIGHT,
++    INPUT_ACTION_UP,
++    INPUT_ACTION_DOWN,
++    INPUT_ACTION_START,
++    INPUT_ACTION_SELECT,
++    INPUT_ACTION_A,
++    INPUT_ACTION_B,
++    INPUT_ACTION_X,
++    INPUT_ACTION_Y,
++    INPUT_ACTION_L2,
++    INPUT_ACTION_R2,
++    INPUT_ACTION_VOL_DOWN,
++    INPUT_ACTION_VOL_UP,
++} InputAction;
++
++static int _platform_input_fd = -1;
++static struct input_event _platform_input_ev;
++static struct pollfd _platform_input_fds[1];
++
++static InputAction _miyoo_code_to_action(unsigned int code)
++{
++    switch (code) {
++    case HW_BTN_MENU:        return INPUT_ACTION_MENU;
++    case HW_BTN_POWER:       return INPUT_ACTION_POWER;
++    case HW_BTN_LEFT:        return INPUT_ACTION_LEFT;
++    case HW_BTN_RIGHT:       return INPUT_ACTION_RIGHT;
++    case HW_BTN_UP:          return INPUT_ACTION_UP;
++    case HW_BTN_DOWN:        return INPUT_ACTION_DOWN;
++    case HW_BTN_START:       return INPUT_ACTION_START;
++    case HW_BTN_SELECT:      return INPUT_ACTION_SELECT;
++    case HW_BTN_A:           return INPUT_ACTION_A;
++    case HW_BTN_B:           return INPUT_ACTION_B;
++    case HW_BTN_X:           return INPUT_ACTION_X;
++    case HW_BTN_Y:           return INPUT_ACTION_Y;
++    case HW_BTN_L2:          return INPUT_ACTION_L2;
++    case HW_BTN_R2:          return INPUT_ACTION_R2;
++    case HW_BTN_VOLUME_DOWN: return INPUT_ACTION_VOL_DOWN;
++    case HW_BTN_VOLUME_UP:   return INPUT_ACTION_VOL_UP;
++    default:                 return INPUT_ACTION_NONE;
++    }
++}
++
++void platform_input_init(void)
++{
++    _platform_input_fd = open("/dev/input/event0", O_RDONLY);
++    memset(_platform_input_fds, 0, sizeof(_platform_input_fds));
++    _platform_input_fds[0].fd = _platform_input_fd;
++    _platform_input_fds[0].events = POLLIN;
++}
++
++void platform_input_quit(void)
++{
++    if (_platform_input_fd >= 0) {
++        close(_platform_input_fd);
++        _platform_input_fd = -1;
++    }
++}
++
++// Poll for the next input event. Returns true if an event is available.
++// Skips REPEAT events (value=2) and non-key events.
++bool platform_input_poll(InputAction *action, bool *is_pressed)
++{
++    while (poll(_platform_input_fds, 1, 0) > 0) {
++        read(_platform_input_fd, &_platform_input_ev, sizeof(_platform_input_ev));
++        if (_platform_input_ev.type != EV_KEY || _platform_input_ev.value > 1) {
++            continue; // skip non-key events and REPEAT (value=2)
++        }
++        *is_pressed = (_platform_input_ev.value == 1);
++        *action = _miyoo_code_to_action(_platform_input_ev.code);
++        return true;
++    }
++    return false;
++}
++
++#endif // PLATFORM_INPUT_H__
+diff --git a/src/platform/miyoomini/platform_paths.h b/src/platform/miyoomini/platform_paths.h
+new file mode 100644
+index 00000000..b739e6aa
+--- /dev/null
++++ b/src/platform/miyoomini/platform_paths.h
+@@ -0,0 +1,13 @@
++#ifndef PLATFORM_PATHS_H__
++#define PLATFORM_PATHS_H__
++
++#define SYSTEM_RESOURCES      "/mnt/SDCARD/.tmp_update/res/"
++#define MUSICPLAYER_RESOURCES "/mnt/SDCARD/Music/"
++#define STORIES_RESOURCES     "/mnt/SDCARD/Stories/"
++#define STORIES_SAVES         "/mnt/SDCARD/Saves/Stories/"
++#define APP_SAVEFILE          "/mnt/SDCARD/Saves/.storytellerState"
++#define APP_PARAMETERS_PATH   "/mnt/SDCARD/Saves/.parameters"
++#define FALLBACK_FONT_REGULAR "/mnt/SDCARD/.tmp_update/res/Exo2-Regular.ttf"
++#define FALLBACK_FONT_BOLD    "/mnt/SDCARD/.tmp_update/res/Exo2-Bold.ttf"
++
++#endif // PLATFORM_PATHS_H__
+diff --git a/src/platform/miyoomini/platform_system.h b/src/platform/miyoomini/platform_system.h
+new file mode 100644
+index 00000000..a9b8236b
+--- /dev/null
++++ b/src/platform/miyoomini/platform_system.h
+@@ -0,0 +1,15 @@
++#ifndef PLATFORM_SYSTEM_H__
++#define PLATFORM_SYSTEM_H__
++
++#include "utils/flags.h"
++
++// Miyoo Mini shutdown: create .offOrder flag for runtime.sh
++static inline void _platform_system_shutdown(void)
++{
++    // runtime.sh checks for this file to show shutdown screen
++    temp_flag_set(".offOrder", true);
++}
++
++#define PLATFORM_SYSTEM_SHUTDOWN() _platform_system_shutdown()
++
++#endif // PLATFORM_SYSTEM_H__
+diff --git a/src/platform/portmaster/platform_battery.h b/src/platform/portmaster/platform_battery.h
+new file mode 100644
+index 00000000..619fcbb6
+--- /dev/null
++++ b/src/platform/portmaster/platform_battery.h
+@@ -0,0 +1,73 @@
++#ifndef PLATFORM_BATTERY_H__
++#define PLATFORM_BATTERY_H__
++
++#include <stdbool.h>
++#include <stdio.h>
++#include "utils/file.h"
++
++// Linux power supply sysfs paths
++// Common paths for ARM handheld devices (R36S, RK3326, etc.)
++#define BATTERY_CAPACITY_PATH "/sys/class/power_supply/battery/capacity"
++#define BATTERY_STATUS_PATH   "/sys/class/power_supply/battery/status"
++
++// Alternative paths for some devices
++#define BATTERY_CAPACITY_ALT  "/sys/class/power_supply/BAT0/capacity"
++#define BATTERY_STATUS_ALT    "/sys/class/power_supply/BAT0/status"
++
++static int _platform_battery_get_percentage(void)
++{
++    FILE *fp;
++    int percentage = 0;
++
++    // Try primary battery path
++    if (exists(BATTERY_CAPACITY_PATH)) {
++        file_get(fp, BATTERY_CAPACITY_PATH, "%d", &percentage);
++    }
++    // Try alternative path
++    else if (exists(BATTERY_CAPACITY_ALT)) {
++        file_get(fp, BATTERY_CAPACITY_ALT, "%d", &percentage);
++    }
++
++    // Clamp to valid range
++    if (percentage < 0) percentage = 0;
++    if (percentage > 100) percentage = 100;
++
++    return percentage;
++}
++
++static bool _platform_battery_is_charging(void)
++{
++    FILE *fp;
++    char status[16] = {0};
++
++    // Try primary battery path
++    if (exists(BATTERY_STATUS_PATH)) {
++        fp = fopen(BATTERY_STATUS_PATH, "r");
++        if (fp) {
++            if (fgets(status, sizeof(status), fp) != NULL) {
++                fclose(fp);
++                // Status is "Charging" or "Discharging" or "Full" or "Not charging"
++                return (strncmp(status, "Charging", 8) == 0);
++            }
++            fclose(fp);
++        }
++    }
++    // Try alternative path
++    else if (exists(BATTERY_STATUS_ALT)) {
++        fp = fopen(BATTERY_STATUS_ALT, "r");
++        if (fp) {
++            if (fgets(status, sizeof(status), fp) != NULL) {
++                fclose(fp);
++                return (strncmp(status, "Charging", 8) == 0);
++            }
++            fclose(fp);
++        }
++    }
++
++    return false;
++}
++
++#define PLATFORM_BATTERY_GET_PERCENTAGE() _platform_battery_get_percentage()
++#define PLATFORM_BATTERY_IS_CHARGING()    _platform_battery_is_charging()
++
++#endif // PLATFORM_BATTERY_H__
+diff --git a/src/platform/portmaster/platform_brightness.h b/src/platform/portmaster/platform_brightness.h
+new file mode 100644
+index 00000000..ffd94120
+--- /dev/null
++++ b/src/platform/portmaster/platform_brightness.h
+@@ -0,0 +1,77 @@
++#ifndef PLATFORM_BRIGHTNESS_H__
++#define PLATFORM_BRIGHTNESS_H__
++
++// Linux sysfs backlight interface
++#define BACKLIGHT_SYS_PATH      "/sys/class/backlight/backlight/"
++#define BACKLIGHT_BRIGHTNESS     BACKLIGHT_SYS_PATH "brightness"
++#define BACKLIGHT_MAX_BRIGHTNESS BACKLIGHT_SYS_PATH "max_brightness"
++
++static uint32_t display_backlight_max = 255;
++static uint32_t display_backlight_current = 255;
++
++void platform_brightness_init(void)
++{
++    FILE *fp;
++    file_get(fp, BACKLIGHT_MAX_BRIGHTNESS, "%u", &display_backlight_max);
++    if (display_backlight_max == 0) {
++        display_backlight_max = 255;
++    }
++    file_get(fp, BACKLIGHT_BRIGHTNESS, "%u", &display_backlight_current);
++    if (display_backlight_current == 0) {
++        display_backlight_current = display_backlight_max;
++    }
++}
++
++void display_setBrightnessRaw(uint32_t value)
++{
++    if (value > display_backlight_max) {
++        value = display_backlight_max;
++    }
++    display_backlight_current = value;
++    FILE *fp;
++    file_put_sync(fp, BACKLIGHT_BRIGHTNESS, "%u", value);
++    printf_debug("Raw brightness: %d\n", value);
++}
++
++int display_getBrightnessRaw(void)
++{
++    return (int)display_backlight_current;
++}
++
++int display_getBrightnessMax(void)
++{
++    return (int)display_backlight_max;
++}
++
++// Set display brightness (0 - 10) scaled linearly to hardware range
++void display_setBrightness(uint32_t value)
++{
++    if (value > 10) {
++        value = 10;
++    }
++    int value_raw = (int)round(((double)value / 10.0) * (double)display_backlight_max);
++    if (value > 0 && value_raw < 1) {
++        value_raw = 1;
++    }
++    display_setBrightnessRaw(value_raw);
++}
++
++void display_setScreen(bool enabled)
++{
++    if (enabled == display_enabled) {
++        return;
++    }
++    if (enabled) {
++        if (display_backlight_current == 0) {
++            display_backlight_current = display_backlight_max / 3;
++        }
++        display_setBrightnessRaw(display_backlight_current);
++    }
++    else {
++        display_backlight_current = display_getBrightnessRaw();
++        display_setBrightnessRaw(0);
++    }
++    display_enabled = enabled;
++}
++
++#endif // PLATFORM_BRIGHTNESS_H__
+diff --git a/src/platform/portmaster/platform_display.h b/src/platform/portmaster/platform_display.h
+new file mode 100644
+index 00000000..45ea717a
+--- /dev/null
++++ b/src/platform/portmaster/platform_display.h
+@@ -0,0 +1,10 @@
++#ifndef PLATFORM_DISPLAY_H__
++#define PLATFORM_DISPLAY_H__
++
++#include "SDL2/SDL.h"
++
++// Use ARGB8888 for PortMaster devices (R36S, RK3326-based handhelds)
++// This prevents color inversion issues on these devices
++#define PLATFORM_SDL_PIXEL_FORMAT SDL_PIXELFORMAT_ARGB8888
++
++#endif // PLATFORM_DISPLAY_H__
+diff --git a/src/platform/portmaster/platform_input.h b/src/platform/portmaster/platform_input.h
+new file mode 100644
+index 00000000..e8cd010e
+--- /dev/null
++++ b/src/platform/portmaster/platform_input.h
+@@ -0,0 +1,236 @@
++#ifndef PLATFORM_INPUT_H__
++#define PLATFORM_INPUT_H__
++
++#include "SDL2/SDL.h"
++
++typedef enum InputAction {
++    INPUT_ACTION_NONE = 0,
++    INPUT_ACTION_QUIT,
++    INPUT_ACTION_MENU,
++    INPUT_ACTION_POWER,
++    INPUT_ACTION_LEFT,
++    INPUT_ACTION_RIGHT,
++    INPUT_ACTION_UP,
++    INPUT_ACTION_DOWN,
++    INPUT_ACTION_START,
++    INPUT_ACTION_SELECT,
++    INPUT_ACTION_A,
++    INPUT_ACTION_B,
++    INPUT_ACTION_X,
++    INPUT_ACTION_Y,
++    INPUT_ACTION_L2,
++    INPUT_ACTION_R2,
++    INPUT_ACTION_VOL_DOWN,
++    INPUT_ACTION_VOL_UP,
++} InputAction;
++
++static SDL_GameController *_platform_input_controllers[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
++static int _platform_input_opened_controllers = 0;
++
++// Double-tap SELECT+START to quit
++static bool _select_held = false;
++static bool _start_held = false;
++static Uint32 _last_combo_release_time = 0;
++static int _combo_tap_count = 0;
++#define DOUBLE_TAP_TIMEOUT_MS 500
++
++static InputAction _key_to_action(SDL_Keycode key)
++{
++    switch (key) {
++    case SDLK_ESCAPE:    return INPUT_ACTION_MENU;
++    case SDLK_LEFT:      return INPUT_ACTION_LEFT;
++    case SDLK_RIGHT:     return INPUT_ACTION_RIGHT;
++    case SDLK_UP:        return INPUT_ACTION_UP;
++    case SDLK_DOWN:      return INPUT_ACTION_DOWN;
++    case SDLK_RETURN:    return INPUT_ACTION_START;
++    case SDLK_BACKSPACE: return INPUT_ACTION_SELECT;
++    case SDLK_z:         return INPUT_ACTION_A;
++    case SDLK_x:         return INPUT_ACTION_B;
++    case SDLK_a:         return INPUT_ACTION_Y;
++    case SDLK_s:         return INPUT_ACTION_X;
++    case SDLK_q:         return INPUT_ACTION_L2;
++    case SDLK_w:         return INPUT_ACTION_R2;
++    case SDLK_MINUS:     return INPUT_ACTION_VOL_DOWN;
++    case SDLK_EQUALS:    return INPUT_ACTION_VOL_UP;
++    default:             return INPUT_ACTION_NONE;
++    }
++}
++
++static InputAction _controller_to_action(Uint8 button)
++{
++    switch (button) {
++    case SDL_CONTROLLER_BUTTON_BACK:        return INPUT_ACTION_MENU;
++    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:   return INPUT_ACTION_LEFT;
++    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:  return INPUT_ACTION_RIGHT;
++    case SDL_CONTROLLER_BUTTON_DPAD_UP:     return INPUT_ACTION_UP;
++    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:   return INPUT_ACTION_DOWN;
++    case SDL_CONTROLLER_BUTTON_START:       return INPUT_ACTION_START;
++    case SDL_CONTROLLER_BUTTON_A:           return INPUT_ACTION_A;
++    case SDL_CONTROLLER_BUTTON_B:           return INPUT_ACTION_B;
++    case SDL_CONTROLLER_BUTTON_X:           return INPUT_ACTION_X;
++    case SDL_CONTROLLER_BUTTON_Y:           return INPUT_ACTION_Y;
++    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return INPUT_ACTION_L2;
++    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return INPUT_ACTION_R2;
++    default:                                return INPUT_ACTION_NONE;
++    }
++}
++
++static InputAction _joystick_button_to_action(Uint8 button)
++{
++    switch (button) {
++    case 0: return INPUT_ACTION_A;
++    case 1: return INPUT_ACTION_B;
++    case 2: return INPUT_ACTION_X;
++    case 3: return INPUT_ACTION_Y;
++    case 4: return INPUT_ACTION_L2;
++    case 5: return INPUT_ACTION_R2;
++    case 6: return INPUT_ACTION_SELECT;
++    case 7: return INPUT_ACTION_START;
++    case 8: return INPUT_ACTION_MENU;
++    default: return INPUT_ACTION_NONE;
++    }
++}
++
++void platform_input_init(void)
++{
++    SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER);
++    SDL_GameControllerEventState(SDL_ENABLE);
++    SDL_JoystickEventState(SDL_ENABLE);
++
++    int joystickCount = SDL_NumJoysticks();
++    for (int i = 0; i < joystickCount && _platform_input_opened_controllers < 8; ++i) {
++        if (!SDL_IsGameController(i)) {
++            continue;
++        }
++        SDL_GameController *controller = SDL_GameControllerOpen(i);
++        if (controller != NULL) {
++            _platform_input_controllers[_platform_input_opened_controllers++] = controller;
++        }
++    }
++}
++
++void platform_input_quit(void)
++{
++    for (int i = 0; i < _platform_input_opened_controllers; ++i) {
++        if (_platform_input_controllers[i] != NULL) {
++            SDL_GameControllerClose(_platform_input_controllers[i]);
++            _platform_input_controllers[i] = NULL;
++        }
++    }
++    _platform_input_opened_controllers = 0;
++    SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER);
++}
++
++// Poll for the next input event. Returns true if an event is available.
++// Sets action=INPUT_ACTION_QUIT for SDL_QUIT events.
++bool platform_input_poll(InputAction *action, bool *is_pressed)
++{
++    SDL_Event event;
++    while (SDL_PollEvent(&event)) {
++        InputAction evt_action = INPUT_ACTION_NONE;
++        bool evt_pressed = false;
++        bool evt_released = false;
++
++        if (event.type == SDL_QUIT) {
++            *action = INPUT_ACTION_QUIT;
++            *is_pressed = false;
++            return true;
++        }
++        else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
++            evt_action = _controller_to_action(event.cbutton.button);
++            evt_pressed = true;
++        }
++        else if (event.type == SDL_CONTROLLERBUTTONUP) {
++            evt_action = _controller_to_action(event.cbutton.button);
++            evt_released = true;
++        }
++        else if (event.type == SDL_JOYBUTTONDOWN) {
++            // Skip joystick events for devices opened as game controllers
++            // (SDL sends both controller and joystick events for the same input)
++            if (SDL_IsGameController(event.jbutton.which)) {
++                continue;
++            }
++            evt_action = _joystick_button_to_action(event.jbutton.button);
++            evt_pressed = true;
++        }
++        else if (event.type == SDL_JOYBUTTONUP) {
++            if (SDL_IsGameController(event.jbutton.which)) {
++                continue;
++            }
++            evt_action = _joystick_button_to_action(event.jbutton.button);
++            evt_released = true;
++        }
++        else if (event.type == SDL_JOYHATMOTION) {
++            if (SDL_IsGameController(event.jhat.which)) {
++                continue;
++            }
++            if (event.jhat.value & SDL_HAT_LEFT) {
++                evt_action = INPUT_ACTION_LEFT;
++                evt_pressed = true;
++            }
++            else if (event.jhat.value & SDL_HAT_RIGHT) {
++                evt_action = INPUT_ACTION_RIGHT;
++                evt_pressed = true;
++            }
++            else if (event.jhat.value & SDL_HAT_UP) {
++                evt_action = INPUT_ACTION_UP;
++                evt_pressed = true;
++            }
++            else if (event.jhat.value & SDL_HAT_DOWN) {
++                evt_action = INPUT_ACTION_DOWN;
++                evt_pressed = true;
++            }
++        }
++        else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
++            evt_action = _key_to_action(event.key.keysym.sym);
++            evt_pressed = true;
++        }
++        else if (event.type == SDL_KEYUP) {
++            evt_action = _key_to_action(event.key.keysym.sym);
++            evt_released = true;
++        }
++
++        if (evt_action == INPUT_ACTION_NONE || (!evt_pressed && !evt_released)) {
++            continue;
++        }
++
++        // Track SELECT+START or MENU+START double-tap for quit
++        // Note: SELECT button may be mapped as MENU when using controller events
++        if (evt_action == INPUT_ACTION_SELECT || evt_action == INPUT_ACTION_MENU) {
++            _select_held = evt_pressed;
++        }
++        if (evt_action == INPUT_ACTION_START) {
++            _start_held = evt_pressed;
++        }
++
++        // Check if both buttons are held together
++        bool combo_held = _select_held && _start_held;
++
++        // When combo is released (both were held, now at least one is released)
++        static bool _last_combo_held = false;
++        if (_last_combo_held && !combo_held) {
++            Uint32 now = SDL_GetTicks();
++            if (now - _last_combo_release_time < DOUBLE_TAP_TIMEOUT_MS) {
++                _combo_tap_count++;
++                if (_combo_tap_count >= 2) {
++                    // Double-tap detected! Send quit action
++                    _combo_tap_count = 0;
++                    *action = INPUT_ACTION_QUIT;
++                    *is_pressed = false;
++                    return true;
++                }
++            } else {
++                _combo_tap_count = 1;
++            }
++            _last_combo_release_time = now;
++        }
++        _last_combo_held = combo_held;
++
++        *action = evt_action;
++        *is_pressed = evt_pressed;
++        return true;
++    }
++    return false;
++}
++
++#endif // PLATFORM_INPUT_H__
+diff --git a/src/platform/portmaster/platform_paths.h b/src/platform/portmaster/platform_paths.h
+new file mode 100644
+index 00000000..1f7fdc8d
+--- /dev/null
++++ b/src/platform/portmaster/platform_paths.h
+@@ -0,0 +1,137 @@
++#ifndef PLATFORM_PATHS_H__
++#define PLATFORM_PATHS_H__
++
++#include <limits.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#ifndef PATH_MAX
++#define PATH_MAX 4096
++#endif
++
++static bool _platform_paths_initialized = false;
++static char _platform_paths_game_dir[PATH_MAX] = {'\0'};
++static char _platform_paths_system_resources[PATH_MAX] = {'\0'};
++static char _platform_paths_music_resources[PATH_MAX] = {'\0'};
++static char _platform_paths_stories_resources[PATH_MAX] = {'\0'};
++static char _platform_paths_stories_saves[PATH_MAX] = {'\0'};
++static char _platform_paths_savefile[PATH_MAX] = {'\0'};
++static char _platform_paths_parameters[PATH_MAX] = {'\0'};
++static char _platform_paths_font_regular[PATH_MAX] = {'\0'};
++static char _platform_paths_font_bold[PATH_MAX] = {'\0'};
++
++static void _platform_paths_copy(char *dst, const char *src)
++{
++    strncpy(dst, src, PATH_MAX - 1);
++    dst[PATH_MAX - 1] = '\0';
++}
++
++static void _platform_paths_join(char *dst, const char *left, const char *right)
++{
++    _platform_paths_copy(dst, left);
++    strncat(dst, right, PATH_MAX - strlen(dst) - 1);
++}
++
++static void _platform_paths_init(void)
++{
++    if (_platform_paths_initialized) {
++        return;
++    }
++
++    const char *gameDir = getenv("GAMEDIR");
++    if (gameDir != NULL && gameDir[0] != '\0') {
++        _platform_paths_copy(_platform_paths_game_dir, gameDir);
++    }
++    else if (getcwd(_platform_paths_game_dir, PATH_MAX) == NULL) {
++        _platform_paths_copy(_platform_paths_game_dir, ".");
++    }
++
++    // User data (Stories/, Music/, Saves/) lives either under GAMEDIR/data (default, PortMaster style) or,
++    // when TELMI_DATA_DIR is set, at the root of that directory: the layout of a Telmi OS card, so that
++    // Telmi Sync can manage the card (Stories/, Music/, Saves/.parameters at the volume root).
++    char dataDir[PATH_MAX] = {'\0'};
++    const char *envDataDir = getenv("TELMI_DATA_DIR");
++    if (envDataDir != NULL && envDataDir[0] != '\0') {
++        _platform_paths_copy(dataDir, envDataDir);
++        size_t n = strlen(dataDir);
++        while (n > 1 && dataDir[n - 1] == '/') {
++            dataDir[--n] = '\0';
++        }
++    }
++    else {
++        _platform_paths_join(dataDir, _platform_paths_game_dir, "/data");
++    }
++
++    _platform_paths_join(_platform_paths_system_resources, _platform_paths_game_dir, "/data/res/");
++    _platform_paths_join(_platform_paths_music_resources, dataDir, "/Music/");
++    _platform_paths_join(_platform_paths_stories_resources, dataDir, "/Stories/");
++    _platform_paths_join(_platform_paths_stories_saves, dataDir, "/Saves/Stories/");
++    _platform_paths_join(_platform_paths_savefile, dataDir, "/Saves/.storytellerState");
++    _platform_paths_join(_platform_paths_parameters, dataDir, "/Saves/.parameters");
++    _platform_paths_join(_platform_paths_font_regular, _platform_paths_system_resources, "Exo2-Regular.ttf");
++    _platform_paths_join(_platform_paths_font_bold, _platform_paths_system_resources, "Exo2-Bold.ttf");
++
++    _platform_paths_initialized = true;
++}
++
++static const char *_platform_paths_system_resources_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_system_resources;
++}
++
++static const char *_platform_paths_music_resources_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_music_resources;
++}
++
++static const char *_platform_paths_stories_resources_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_stories_resources;
++}
++
++static const char *_platform_paths_stories_saves_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_stories_saves;
++}
++
++static const char *_platform_paths_savefile_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_savefile;
++}
++
++static const char *_platform_paths_parameters_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_parameters;
++}
++
++static const char *_platform_paths_font_regular_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_font_regular;
++}
++
++static const char *_platform_paths_font_bold_get(void)
++{
++    _platform_paths_init();
++    return _platform_paths_font_bold;
++}
++
++#define SYSTEM_RESOURCES      ((char *)_platform_paths_system_resources_get())
++#define MUSICPLAYER_RESOURCES ((char *)_platform_paths_music_resources_get())
++#define STORIES_RESOURCES     ((char *)_platform_paths_stories_resources_get())
++#define STORIES_SAVES         ((char *)_platform_paths_stories_saves_get())
++#define APP_SAVEFILE          ((char *)_platform_paths_savefile_get())
++#define APP_PARAMETERS_PATH   ((char *)_platform_paths_parameters_get())
++#define FALLBACK_FONT_REGULAR ((char *)_platform_paths_font_regular_get())
++#define FALLBACK_FONT_BOLD    ((char *)_platform_paths_font_bold_get())
++
++#endif // PLATFORM_PATHS_H__
+diff --git a/src/platform/portmaster/platform_system.h b/src/platform/portmaster/platform_system.h
+new file mode 100644
+index 00000000..a0f99581
+--- /dev/null
++++ b/src/platform/portmaster/platform_system.h
+@@ -0,0 +1,15 @@
++#ifndef PLATFORM_SYSTEM_H__
++#define PLATFORM_SYSTEM_H__
++
++#include "utils/flags.h"
++
++// PortMaster shutdown: create flag file for launcher script to detect
++static inline void _platform_system_shutdown(void)
++{
++    // The launcher script checks for this file at exit
++    temp_flag_set("telmi_poweroff.flag", true);
++}
++
++#define PLATFORM_SYSTEM_SHUTDOWN() _platform_system_shutdown()
++
++#endif // PLATFORM_SYSTEM_H__
+diff --git a/src/storyTeller/app_parameters.h b/src/storyTeller/app_parameters.h
+index c342268b..9d57500d 100644
+--- a/src/storyTeller/app_parameters.h
++++ b/src/storyTeller/app_parameters.h
+@@ -17,7 +17,7 @@ static bool app_parameters_storyDisableNightMode = false;
+ static bool app_parameters_storyDisableTimeline = false;
+ static bool app_parameters_musicDisableRepeatModes = false;
+ 
+-#define APP_PARAMETERS_PATH "/mnt/SDCARD/Saves/.parameters"
++#include "platform_paths.h"
+ 
+ int parameters_getAudioVolumeStartup() {
+     return (int) (app_parameters_audioVolumeStartup * app_parameters_systemAudioVolumeMax + 0.5);
+diff --git a/src/storyTeller/app_selector.h b/src/storyTeller/app_selector.h
+index 14fae019..02b2cbeb 100644
+--- a/src/storyTeller/app_selector.h
++++ b/src/storyTeller/app_selector.h
+@@ -9,8 +9,7 @@
+ #define APP_MUSIC 1
+ #define APP_NIGHTMODE 2
+ 
+-#define SYSTEM_RESOURCES "/mnt/SDCARD/.tmp_update/res/"
+-#define APP_SAVEFILE "/mnt/SDCARD/Saves/.storytellerState"
++#include "platform_paths.h"
+ 
+ #include "./sdl_helper.h"
+ #include "./music_player.h"
+diff --git a/src/storyTeller/music_player.h b/src/storyTeller/music_player.h
+index de917111..dd461fe2 100644
+--- a/src/storyTeller/music_player.h
++++ b/src/storyTeller/music_player.h
+@@ -20,9 +20,6 @@
+ #include "./array_helper.h"
+ #include "./time_helper.h"
+ 
+-#define SYSTEM_RESOURCES "/mnt/SDCARD/.tmp_update/res/"
+-#define MUSICPLAYER_RESOURCES "/mnt/SDCARD/Music/"
+-
+ #define MUSICPLAYER_MODE_PLAYER 0
+ #define MUSICPLAYER_MODE_ALBUM 1
+ 
+diff --git a/src/storyTeller/sdl_helper.h b/src/storyTeller/sdl_helper.h
+index 4fc3f5dc..93f04fc0 100644
+--- a/src/storyTeller/sdl_helper.h
++++ b/src/storyTeller/sdl_helper.h
+@@ -20,11 +20,7 @@
+ #include "./app_parameters.h"
+ #include "./app_volume.h"
+ #include "./app_brightness.h"
+-
+-#define SYSTEM_RESOURCES "/mnt/SDCARD/.tmp_update/res/"
+-
+-#define FALLBACK_FONT_REGULAR "/mnt/SDCARD/.tmp_update/res/Exo2-Regular.ttf"
+-#define FALLBACK_FONT_BOLD "/mnt/SDCARD/.tmp_update/res/Exo2-Bold.ttf"
++#include "platform_display.h"
+ 
+ #define SDL_ALIGN_LEFT 0
+ #define SDL_ALIGN_RIGHT 1
+@@ -282,7 +278,7 @@ void video_audio_init(void) {
+     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+     screen = SDL_CreateRGBSurface(0, 640, 480, 32, 0, 0, 0, 0);
+     appSurface = SDL_CreateRGBSurface(0, screen->w, screen->h, 32, 0, 0, 0, 0);
+-    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB565, SDL_TEXTUREACCESS_STREAMING, screen->w, screen->h);
++    texture = SDL_CreateTexture(renderer, PLATFORM_SDL_PIXEL_FORMAT, SDL_TEXTUREACCESS_STREAMING, screen->w, screen->h);
+ 
+     fontBold24 = TTF_OpenFont(FALLBACK_FONT_BOLD, 24);
+     fontBold20 = TTF_OpenFont(FALLBACK_FONT_BOLD, 20);
+@@ -306,4 +302,4 @@ void video_audio_quit(void) {
+     SDL_Quit();
+ }
+ 
+-#endif // STORYTELLER_SDL_HELPER__
+\ No newline at end of file
++#endif // STORYTELLER_SDL_HELPER__
+diff --git a/src/storyTeller/stories_reader.h b/src/storyTeller/stories_reader.h
+index c802a168..412ccd66 100644
+--- a/src/storyTeller/stories_reader.h
++++ b/src/storyTeller/stories_reader.h
+@@ -19,10 +19,6 @@
+ #include "./time_helper.h"
+ #include "./logs_helper.h"
+ 
+-#define SYSTEM_RESOURCES "/mnt/SDCARD/.tmp_update/res/"
+-#define STORIES_RESOURCES "/mnt/SDCARD/Stories/"
+-#define STORIES_SAVES "/mnt/SDCARD/Saves/Stories/"
+-
+ #define STORIES_DISPLAY_MODE_SINGLE 0
+ #define STORIES_DISPLAY_MODE_TILES 1
+ 
+diff --git a/src/storyTeller/storyTeller.c b/src/storyTeller/storyTeller.c
+index 307705a4..f3763e73 100644
+--- a/src/storyTeller/storyTeller.c
++++ b/src/storyTeller/storyTeller.c
+@@ -1,11 +1,9 @@
+-#include <poll.h>
+ #include <stdbool.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <time.h>
+ 
+ #include "system/system.h"
+-#include "system/keymap_hw.h"
+ #include "system/settings.h"
+ #include "system/settings_sync.h"
+ #include "system/display.h"
+@@ -20,28 +18,9 @@
+ #include "./sdl_helper.h"
+ #include "./app_selector.h"
+ #include "./app_parameters.h"
++#include "platform_input.h"
+ #include "./headphone.h"
+ 
+-// for ev.value
+-#define RELEASED 0
+-#define PRESSED 1
+-#define REPEAT 2
+-
+-// Global Variables
+-static int input_fd;
+-static struct input_event ev;
+-static struct pollfd fds[1];
+-
+-bool keyinput_isValid(void) {
+-    read(input_fd, &ev, sizeof(ev));
+-
+-    if (ev.type != EV_KEY || ev.value > REPEAT) {
+-        return false;
+-    }
+-
+-    return true;
+-}
+-
+ int main(int argc, char *argv[]) {
+     srand(time(NULL));
+     display_init();
+@@ -61,18 +40,17 @@ int main(int argc, char *argv[]) {
+     autosleep_init(parameters_getScreenOnInactivityTime(), parameters_getScreenOffInactivityTime());
+     app_init();
+ 
+-    input_fd = open("/dev/input/event0", O_RDONLY);
+-    memset(&fds, 0, sizeof(fds));
+-    fds[0].fd = input_fd;
+-    fds[0].events = POLLIN;
++    platform_input_init();
+ 
+     bool isMenuPressed = false;
+     bool menuPreventDefault = false;
+     bool startPowerPressed = false;
+     long startPowerPressedTime = 0;
++    bool shouldPowerOff = false;
+ 
+     while (1) {
+         if (autosleep_isSleepingTime() || (startPowerPressed && (get_time() - startPowerPressedTime) > 1)) {
++            shouldPowerOff = true;
+             goto exit_loop;
+         }
+ 
+@@ -82,122 +60,108 @@ int main(int argc, char *argv[]) {
+         app_update();
+         headphone_check();
+ 
+-        if (poll(fds, 1, 0) > 0) {
+-            if (!keyinput_isValid()) {
+-                continue;
++        InputAction action;
++        bool isPressed;
++        while (platform_input_poll(&action, &isPressed)) {
++            if (action == INPUT_ACTION_QUIT) {
++                goto exit_loop;
+             }
+-            switch (ev.value) {
+-                case PRESSED:
+-                    switch (ev.code) {
+-                        case HW_BTN_MENU:
+-                            isMenuPressed = true;
+-                            forceRefreshScreen = applock_startTimer() || forceRefreshScreen;
+-                            if (applock_isLocked()) {
+-                                menuPreventDefault = true;
+-                            }
+-                            break;
+-                        case HW_BTN_POWER:
+-                            if (!applock_isLocked()) {
+-                                startPowerPressedTime = get_time();
+-                                startPowerPressed = true;
+-                            }
+-                            break;
+-                    }
+-                    break;
+ 
+-                case RELEASED:
+-                    if (applock_isLocked()) {
+-                        if (ev.code == HW_BTN_MENU) {
+-                            forceRefreshScreen = applock_stopTimer() || forceRefreshScreen;
++            if (isPressed) {
++                switch (action) {
++                    case INPUT_ACTION_MENU:
++                        isMenuPressed = true;
++                        forceRefreshScreen = applock_startTimer() || forceRefreshScreen;
++                        if (applock_isLocked()) {
++                            menuPreventDefault = true;
++                        }
++                        break;
++                    case INPUT_ACTION_POWER:
++                        if (!applock_isLocked()) {
++                            startPowerPressedTime = get_time();
++                            startPowerPressed = true;
+                         }
+                         break;
++                    default:
++                        break;
++                }
++            } else {
++                if (applock_isLocked()) {
++                    if (action == INPUT_ACTION_MENU) {
++                        forceRefreshScreen = applock_stopTimer() || forceRefreshScreen;
+                     }
+-                    autosleep_keepAwake();
+-                    switch (ev.code) {
+-                        case HW_BTN_POWER:
+-                            startPowerPressed = false;
+-                            break;
+-                        case HW_BTN_MENU:
+-                            if (!menuPreventDefault) {
+-                                app_menu();
+-                            }
+-                            isMenuPressed = false;
+-                            menuPreventDefault = false;
+-                            forceRefreshScreen = applock_stopTimer() || forceRefreshScreen;
+-                            break;
+-                        case HW_BTN_LEFT:
+-                            if (time_wait()) {
+-                                app_previous();
+-                            }
+-                            break;
+-                        case HW_BTN_RIGHT:
+-                            if (time_wait()) {
+-                                app_next();
+-                            }
++                    continue;
++                }
++                autosleep_keepAwake();
++                switch (action) {
++                    case INPUT_ACTION_POWER:
++                        startPowerPressed = false;
++                        break;
++                    case INPUT_ACTION_MENU:
++                        if (!menuPreventDefault) {
++                            app_menu();
++                        }
++                        isMenuPressed = false;
++                        menuPreventDefault = false;
++                        forceRefreshScreen = applock_stopTimer() || forceRefreshScreen;
++                        break;
++                    case INPUT_ACTION_LEFT:
++                        app_previous();
++                        break;
++                    case INPUT_ACTION_RIGHT:
++                        app_next();
++                        break;
++                    case INPUT_ACTION_UP:
++                        app_up();
++                        break;
++                    case INPUT_ACTION_DOWN:
++                        app_down();
++                        break;
++                    case INPUT_ACTION_START:
++                    case INPUT_ACTION_SELECT:
++                        app_pause();
++                        break;
++                    case INPUT_ACTION_A:
++                    case INPUT_ACTION_B:
++                        app_ok();
++                        break;
++                    case INPUT_ACTION_Y:
++                    case INPUT_ACTION_X:
++                        app_home();
++                        break;
++                    default:
++                        break;
++                }
++
++                if (isMenuPressed) {
++                    switch (action) {
++                        case INPUT_ACTION_L2:
++                        case INPUT_ACTION_VOL_DOWN:
++                            forceRefreshScreen = app_brightness_down();
++                            applock_stopTimer();
++                            menuPreventDefault = true;
+                             break;
+-                        case HW_BTN_UP:
+-                            if (time_wait()) {
+-                                app_up();
+-                            }
++                        case INPUT_ACTION_R2:
++                        case INPUT_ACTION_VOL_UP:
++                            forceRefreshScreen = app_brightness_up();
++                            applock_stopTimer();
++                            menuPreventDefault = true;
+                             break;
+-                        case HW_BTN_DOWN:
+-                            if (time_wait()) {
+-                                app_down();
+-                            }
++                        default:
+                             break;
+-                        case HW_BTN_START:
+-                        case HW_BTN_SELECT:
+-                            if (time_wait()) {
+-                                app_pause();
+-                            }
++                    }
++                } else {
++                    switch (action) {
++                        case INPUT_ACTION_VOL_DOWN:
++                            forceRefreshScreen = app_volume_down();
+                             break;
+-                        case HW_BTN_A:
+-                        case HW_BTN_B:
+-                            if (time_wait()) {
+-                                app_ok();
+-                            }
++                        case INPUT_ACTION_VOL_UP:
++                            forceRefreshScreen = app_volume_up();
+                             break;
+-                        case HW_BTN_Y:
+-                        case HW_BTN_X:
+-                            if (time_wait()) {
+-                                app_home();
+-                            }
++                        default:
+                             break;
+                     }
+-
+-                    if (isMenuPressed) {
+-                        switch (ev.code) {
+-                            case HW_BTN_L2:
+-                            case HW_BTN_VOLUME_DOWN:
+-                                forceRefreshScreen = app_brightness_down();
+-                                applock_stopTimer();
+-                                menuPreventDefault = true;
+-                                break;
+-                            case HW_BTN_R2:
+-                            case HW_BTN_VOLUME_UP:
+-                                forceRefreshScreen = app_brightness_up();
+-                                applock_stopTimer();
+-                                menuPreventDefault = true;
+-                                break;
+-                            default:
+-                                break;
+-                        }
+-                    } else {
+-                        switch (ev.code) {
+-                            case HW_BTN_VOLUME_DOWN:
+-                                forceRefreshScreen = app_volume_down();
+-                                break;
+-                            case HW_BTN_VOLUME_UP:
+-                                forceRefreshScreen = app_volume_up();
+-                                break;
+-                            default:
+-                                break;
+-                        }
+-                    }
+-                    break;
+-
+-                default:
+-                    break;
++                }
+             }
+         }
+ 
+@@ -208,8 +172,11 @@ int main(int argc, char *argv[]) {
+ 
+ exit_loop:
+     app_save();
++    platform_input_quit();
+     display_setScreen(true);
+     video_audio_quit();
+-    system_shutdown();
++    if (shouldPowerOff) {
++        system_shutdown();
++    }
+     return EXIT_SUCCESS;
+ }

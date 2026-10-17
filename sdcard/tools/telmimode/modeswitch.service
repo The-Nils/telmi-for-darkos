@@ -1,0 +1,12 @@
+[Unit]
+Description=Telmi/Emulation mode switch (key combo listener)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/modeswitch_daemon.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
