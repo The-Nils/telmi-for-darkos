@@ -28,6 +28,31 @@ La carte SD est aussi reconnue par **[Telmi Sync](https://github.com/DantSu/Telm
 4. Dans EmulationStation : **Options → Tools → `Install Telmi Mode`** (une seule fois). Attendre le message « Installed ».
 5. **Options → Tools → `Telmi Mode`** : la console redémarre l'interface et affiche Telmi.
 
+Après décompression, la racine de la partition des roms doit ressembler à ceci (les dossiers de systèmes déjà présents, comme `gba/` ou `snes/`, restent intacts) :
+
+```text
+EASYROMS/                          <- racine de la partition des roms
+├── autorun.inf                    <- fait reconnaître la carte par Telmi Sync
+├── Saves/
+│   └── .parameters
+├── Stories/                       <- les histoires (Telmi Sync, ou copie manuelle)
+├── Music/                         <- la musique (.mp3)
+├── ports/
+│   ├── Telmi.sh                   <- lanceur de Telmi
+│   └── telmi/
+│       ├── telmi_rk3326.aarch64   <- le programme Telmi
+│       └── data/res/              <- images et polices
+├── tools/
+│   ├── Install Telmi Mode.sh      <- à lancer une fois (menu Tools)
+│   ├── Telmi Mode.sh              <- bascule en mode Telmi
+│   ├── Uninstall Telmi Mode.sh
+│   ├── Telmi Learn Keys.sh        <- optionnel (autres consoles)
+│   └── telmimode/                 <- fichiers copiés dans le système par l'installation
+├── gba/  snes/  ...               <- les systèmes habituels (non modifiés)
+```
+
+> Le zip ne contient **pas de dossier englobant** : il faut obtenir `EASYROMS/ports/…`, et non `EASYROMS/telmi-for-darkos-1.0.0/ports/…`.
+
 C'est tout. Au prochain démarrage, la console revient directement dans Telmi.
 
 ## Utilisation
