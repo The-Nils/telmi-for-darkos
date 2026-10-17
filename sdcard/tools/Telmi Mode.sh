@@ -15,7 +15,9 @@ fi
 
 touch /home/ark/.config/.TELMI_MODE
 sync  # the flag must survive a reset/power cut right after
-echo "Telmi mode enabled."
+echo "Telmi mode enabled. Rebooting..."
 echo "Exit with: UP UP DOWN DOWN LEFT RIGHT LEFT RIGHT B A"
 sleep 3
-sudo systemctl restart emulationstation
+# Reboot instead of restarting EmulationStation: Telmi's SDL/kmsdrm init hangs (screen stuck on this text)
+# when it is started right after EmulationStation released the display; from a cold boot it works.
+sudo systemctl reboot

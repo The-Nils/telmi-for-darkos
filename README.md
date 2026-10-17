@@ -3,7 +3,7 @@
 _[English version](README.en.md)_
 
 > ### 📦 Téléchargement
-> **[telmi-for-darkos-1.0.0.zip](https://github.com/The-Nils/telmi-for-darkos/releases/download/v1.0.0/telmi-for-darkos-1.0.0.zip)** · [toutes les versions (Releases)](https://github.com/The-Nils/telmi-for-darkos/releases/latest)
+> **[telmi-for-darkos-1.0.1.zip](https://github.com/The-Nils/telmi-for-darkos/releases/download/v1.0.1/telmi-for-darkos-1.0.1.zip)** · [toutes les versions (Releases)](https://github.com/The-Nils/telmi-for-darkos/releases/latest)
 
 Fait tourner **[Telmi](https://telmi.fr)** (le conteur d'histoires open source pour enfants) sur une console portable **R36S** équipée de **dArkOS**, avec deux modes :
 
@@ -22,7 +22,7 @@ La carte SD est aussi reconnue par **[Telmi Sync](https://github.com/DantSu/Telm
 
 ## Installation
 
-1. **Récupérer le kit** : télécharger [`telmi-for-darkos-1.0.0.zip`](https://github.com/The-Nils/telmi-for-darkos/releases/download/v1.0.0/telmi-for-darkos-1.0.0.zip) (ou lancer `scripts/package.sh`).
+1. **Récupérer le kit** : télécharger [`telmi-for-darkos-1.0.1.zip`](https://github.com/The-Nils/telmi-for-darkos/releases/download/v1.0.1/telmi-for-darkos-1.0.1.zip) (ou lancer `scripts/package.sh`).
 2. **Copier le kit sur la carte SD** : insérer la carte dans l'ordinateur et décompresser le contenu du zip **à la racine de la partition des roms** (celle qui s'appelle `EASYROMS`, avec les dossiers `ports`, `tools`, `gba`…). Accepter de fusionner les dossiers `ports` et `tools`.
 3. **Éjecter la carte proprement**, la remettre dans la console et démarrer celle-ci.
 4. Dans EmulationStation : **Options → Tools → `Install Telmi Mode`** (une seule fois). Attendre le message « Installed ».
@@ -51,7 +51,7 @@ EASYROMS/                          <- racine de la partition des roms
 ├── gba/  snes/  ...               <- les systèmes habituels (non modifiés)
 ```
 
-> Le zip ne contient **pas de dossier englobant** : il faut obtenir `EASYROMS/ports/…`, et non `EASYROMS/telmi-for-darkos-1.0.0/ports/…`.
+> Le zip ne contient **pas de dossier englobant** : il faut obtenir `EASYROMS/ports/…`, et non `EASYROMS/telmi-for-darkos-1.0.1/ports/…`.
 
 C'est tout. Au prochain démarrage, la console revient directement dans Telmi.
 

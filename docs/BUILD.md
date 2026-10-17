@@ -33,5 +33,5 @@ Le binaire est produit dans `dist/portmaster-build/telmi_rk3326.aarch64`. Le cop
 ## Créer le zip à distribuer
 
 ```bash
-scripts/package.sh 1.0.0      # -> dist/telmi-for-darkos-1.0.0.zip
+scripts/package.sh 1.0.1      # -> dist/telmi-for-darkos-1.0.1.zip
 ```
