@@ -2,6 +2,9 @@
 
 *[Version française](README.md)*
 
+> ### 📦 Download
+> **[telmi-for-darkos-1.0.0.zip](https://github.com/The-Nils/telmi-for-darkos/releases/download/v1.0.0/telmi-for-darkos-1.0.0.zip)** · [all versions (Releases)](https://github.com/The-Nils/telmi-for-darkos/releases/latest)
+
 Runs **[Telmi](https://telmi.fr)** (the open source story teller for children) on an **R36S** handheld running **dArkOS**, with two modes:
 
 - **Telmi mode**: the console boots straight into Telmi and cannot be left by accident. A secret button combo (Konami-style) leaves it.
@@ -19,7 +22,7 @@ The SD card is also recognized by **[Telmi Sync](https://github.com/DantSu/Telmi
 
 ## Install
 
-1. Get `telmi-for-darkos-<version>.zip` (or run `scripts/package.sh`).
+1. Download [`telmi-for-darkos-1.0.0.zip`](https://github.com/The-Nils/telmi-for-darkos/releases/download/v1.0.0/telmi-for-darkos-1.0.0.zip) (or run `scripts/package.sh`).
 2. Put the SD card in your computer and unzip the content **at the root of the roms partition** (`EASYROMS`: the one with `ports`, `tools`, `gba`…). Merge the `ports` and `tools` folders.
 3. Eject the card, put it back in the console, boot.
 4. In EmulationStation: **Options → Tools → `Install Telmi Mode`** (once). Wait for "Installed".
